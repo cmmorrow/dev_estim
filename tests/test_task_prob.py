@@ -1,0 +1,248 @@
+from datetime import date
+from math import isclose, log
+
+import numpy as np
+import pytest
+
+from dev_estim.task_prob import (
+    DeveloperDurationModel,
+    lognormal_cdf,
+    normal_cdf,
+    working_days_between,
+)
+
+
+def test_returns_zero_for_same_start_and_end_date() -> None:
+    assert working_days_between(date(2024, 12, 2), date(2024, 12, 2)) == 0
+
+
+def test_counts_only_weekdays_across_full_week() -> None:
+    # Monday to the following Monday counts five working days; weekend excluded.
+    assert working_days_between(date(2024, 12, 2), date(2024, 12, 9)) == 5
+
+
+def test_end_date_is_exclusive() -> None:
+    # Tuesday is not counted when due/end is exclusive.
+    assert working_days_between(date(2024, 12, 2), date(2024, 12, 3)) == 1
+
+
+def test_weekend_inside_range_is_ignored() -> None:
+    # Start Friday, end Monday -> only Friday counts.
+    assert working_days_between(date(2024, 12, 6), date(2024, 12, 9)) == 1
+
+
+def test_weekend_start_date_skips_to_next_business_day() -> None:
+    # Starting on a Saturday should start counting from Monday.
+    assert working_days_between(date(2024, 12, 7), date(2024, 12, 10)) == 1
+
+
+def test_add_completed_updates_counts_and_residuals() -> None:
+    model = DeveloperDurationModel()
+
+    model.add_completed(points=2, actual_working_days=2.0)
+
+    expected_eps = log(2.0 / 1.0)  # estimate_days(2) = 1.0
+    assert model.n_completed == 1
+    assert isclose(model.sum_sq, expected_eps * expected_eps, rel_tol=1e-9)
+    assert len(model._eps) == 1 and isclose(model._eps[0], expected_eps, rel_tol=1e-9)
+
+
+def test_posterior_params_accumulates_updates() -> None:
+    model = DeveloperDurationModel(alpha0=2.0, beta0=0.2)
+    model.add_completed(points=3, actual_working_days=6.0)  # estimate_days(3) = 2.0
+    model.add_completed(points=1, actual_working_days=0.5)  # eps = 0
+
+    alpha, beta = model.posterior_params()
+    expected_eps = log(3.0)  # log(6/2)
+    expected_sum_sq = expected_eps * expected_eps  # second update adds zero
+
+    assert isclose(alpha, 3.0, rel_tol=1e-9)
+    assert isclose(beta, 0.2 + 0.5 * expected_sum_sq, rel_tol=1e-9)
+
+
+@pytest.mark.parametrize("invalid_points", [-1, 0, 4, 7])
+def test_add_completed_rejects_invalid_points(invalid_points: int) -> None:
+    model = DeveloperDurationModel()
+    with pytest.raises(ValueError):
+        model.add_completed(points=invalid_points, actual_working_days=1.0)
+
+
+def test_posterior_params_with_custom_prior_values() -> None:
+    model = DeveloperDurationModel(alpha0=0.1, beta0=0.05)
+    model.add_completed(
+        points=1, actual_working_days=0.5
+    )  # matches estimate -> eps = 0
+    model.add_completed(
+        points=5, actual_working_days=10.0
+    )  # estimate_days(5)=5 -> eps=ln(2)
+
+    alpha, beta = model.posterior_params()
+    expected_eps = log(2.0)
+    expected_sum_sq = expected_eps * expected_eps
+
+    assert isclose(alpha, 0.1 + 1.0, rel_tol=1e-9)  # alpha0 + n/2 with n=2
+    assert isclose(beta, 0.05 + 0.5 * expected_sum_sq, rel_tol=1e-9)
+
+
+def test_posterior_params_matches_reference_dataset() -> None:
+    model = DeveloperDurationModel(alpha0=2.0, beta0=0.2)
+    records = [
+        (3, 7.0),
+        (2, 2.0),
+        (1, 0.5),
+        (5, 5.0),
+        (2, 1.0),
+    ]
+
+    for pts, actual in records:
+        model.add_completed(points=pts, actual_working_days=actual)
+
+    alpha, beta = model.posterior_params()
+
+    assert isclose(alpha, 4.5, rel_tol=1e-12)
+    assert isclose(beta, 1.224934034575764, rel_tol=1e-12)
+
+
+def test_posterior_params_integration_with_custom_prior() -> None:
+    model = DeveloperDurationModel(alpha0=1.5, beta0=0.1)
+    records = [
+        (2, 1.0),
+        (8, 15.0),  # 1.5x estimate -> small positive eps
+        (3, 1.0),  # faster than estimate -> negative eps
+    ]
+
+    for pts, actual in records:
+        model.add_completed(points=pts, actual_working_days=actual)
+
+    alpha, beta = model.posterior_params()
+
+    assert isclose(alpha, 3.0, rel_tol=1e-12)
+    assert isclose(beta, 0.4224274839056834, rel_tol=1e-12)
+
+
+def test_sample_sigma_uses_given_rng_and_is_positive() -> None:
+    rng = np.random.default_rng(123)
+    model = DeveloperDurationModel()
+
+    sigmas = model.sample_sigma(n=3, rng=rng)
+
+    assert sigmas.shape == (3,)
+    assert np.all(sigmas > 0)
+    np.testing.assert_allclose(
+        sigmas, np.array([0.53913479, 0.22520074, 0.25160473]), rtol=1e-8
+    )
+
+
+def test_sample_sigma_allows_zero_samples() -> None:
+    rng = np.random.default_rng(42)
+    model = DeveloperDurationModel()
+
+    sigmas = model.sample_sigma(n=0, rng=rng)
+
+    assert sigmas.shape == (0,)
+
+
+def test_p_within_multiplier_is_mean_of_cdf_for_fixed_sigma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    fixed_sigmas = np.array([0.5, 1.0])
+
+    def _fake_sample_sigma(n_samples: int, rng=None):  # type: ignore[override]
+        return fixed_sigmas
+
+    monkeypatch.setattr(model, "sample_sigma", _fake_sample_sigma)
+
+    prob = model.p_within_multiplier(multiplier=1.0, n_samples=2)
+    assert isclose(prob, 0.5, rel_tol=1e-12)
+
+
+def test_p_within_multiplier_handles_multiplier_below_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    fixed_sigmas = np.array([0.5])
+
+    monkeypatch.setattr(model, "sample_sigma", lambda n_samples, rng=None: fixed_sigmas)
+
+    prob = model.p_within_multiplier(multiplier=0.5, n_samples=1)
+    expected = normal_cdf(log(0.5) / fixed_sigmas[0])
+    assert isclose(prob, expected, rel_tol=1e-12)
+
+
+def test_p_within_multiplier_raises_for_non_positive_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    monkeypatch.setattr(
+        model, "sample_sigma", lambda n_samples, rng=None: np.array([1.0])
+    )
+
+    with pytest.raises(ValueError):
+        model.p_within_multiplier(multiplier=0.0, n_samples=1)
+
+
+def test_probability_finish_by_due_rejects_today_before_start() -> None:
+    model = DeveloperDurationModel()
+
+    with pytest.raises(ValueError):
+        model.probability_finish_by_due(
+            start=date(2024, 12, 2),
+            due=date(2024, 12, 5),
+            today=date(2024, 12, 1),
+            points=2,
+            n_samples=10,
+        )
+
+
+def test_probability_finish_by_due_rejects_due_on_or_before_start() -> None:
+    model = DeveloperDurationModel()
+
+    with pytest.raises(ValueError):
+        model.probability_finish_by_due(
+            start=date(2024, 12, 2),
+            due=date(2024, 12, 2),
+            today=date(2024, 12, 3),
+            points=2,
+            n_samples=10,
+        )
+
+
+def test_probability_finish_by_due_returns_zero_when_due_not_after_progress() -> None:
+    model = DeveloperDurationModel()
+    start = date(2024, 12, 2)  # Monday
+    today = date(2024, 12, 4)  # Wednesday
+    due = date(2024, 12, 4)  # end exclusive -> D equals t
+
+    prob = model.probability_finish_by_due(
+        start=start, due=due, today=today, points=2, n_samples=10
+    )
+
+    assert prob == 0.0
+
+
+def test_probability_finish_by_due_matches_manual_calculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    start = date(2024, 12, 2)  # Monday
+    today = date(2024, 12, 3)  # Tuesday -> t = 1 working day
+    due = date(2024, 12, 6)  # Friday (exclusive) -> D = 4 working days
+    fixed_sigmas = np.array([0.5, 1.0])
+
+    monkeypatch.setattr(
+        model, "sample_sigma", lambda n_samples=0, rng=None: fixed_sigmas
+    )
+
+    prob = model.probability_finish_by_due(
+        start=start, due=due, today=today, points=2, n_samples=2
+    )
+
+    t = float(working_days_between(start, today))
+    D = float(working_days_between(start, due))
+    expected = []
+    for s in fixed_sigmas:
+        Ft = lognormal_cdf(t, median=1.0, sigma=s)
+        FD = lognormal_cdf(D, median=1.0, sigma=s)
+        expected.append((FD - Ft) / (1.0 - Ft))
+    assert isclose(prob, sum(expected) / len(expected), rel_tol=1e-12)

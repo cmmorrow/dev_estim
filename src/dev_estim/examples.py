@@ -1,0 +1,39 @@
+from datetime import date
+
+from dev_estim.task_prob import DeveloperDurationModel
+
+# -----------------------------
+# Sanity check with your records
+# -----------------------------
+dev = DeveloperDurationModel(alpha0=2.0, beta0=0.2)
+
+records = [
+    (3, 7.0),
+    (2, 2.0),
+    (1, 0.5),  # "< 1 day" assumed as 0.5; change to 0.75 if you want
+    (5, 5.0),
+    (2, 1.0),
+]
+
+for pts, actual in records:
+    dev.add_completed(pts, actual)
+
+alpha_n, beta_n = dev.posterior_params()
+print("Posterior InvGamma params for sigma^2:")
+print(f"  alpha={alpha_n:.3f}, beta={beta_n:.3f}")
+print(f"  completed tasks: n={dev.n_completed}, sum_sq={dev.sum_sq:.3f}")
+
+# Sanity check: implied P(within 1.5x estimate) under posterior predictive
+p_15x = dev.p_within_multiplier(1.5, n_samples=80000)
+print(f"\nPosterior-predictive P(finish within 1.5× estimate): {p_15x:.3f}")
+
+# Example "plug-in" probability:
+# 5-point task, started 2025-12-01, today 2025-12-15, due 2025-12-19 (due exclusive)
+p_due = dev.probability_finish_by_due(
+    start=date(2025, 12, 1),
+    today=date(2025, 12, 15),
+    due=date(2025, 12, 19),
+    points=5,
+    n_samples=80000,
+)
+print(f"\nExample P(finish by due | still in progress today): {p_due:.3f}")

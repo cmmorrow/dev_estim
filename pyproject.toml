@@ -1,0 +1,21 @@
+[project]
+name = "dev-estim"
+version = "0.1.0"
+description = "A python library for managing and measuring software engineering efficiency"
+readme = "README.md"
+authors = [
+    { name = "Chris Morrow", email = "cmmorrow@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+tests = [
+    "pytest>=9.0.2",
+]
