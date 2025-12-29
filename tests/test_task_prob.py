@@ -4,6 +4,7 @@ from math import isclose, log
 import numpy as np
 import pytest
 
+import dev_estim.task_prob as task_prob
 from dev_estim.task_prob import (
     DeveloperDurationModel,
     lognormal_cdf,
@@ -142,6 +143,18 @@ def test_sample_sigma_allows_zero_samples() -> None:
     assert sigmas.shape == (0,)
 
 
+def test_sample_sigma_accepts_explicit_alpha_beta() -> None:
+    rng = np.random.default_rng(7)
+    expected_rng = np.random.default_rng(7)
+    model = DeveloperDurationModel()
+
+    sigmas = model.sample_sigma(n=4, rng=rng, alpha=1.5, beta=0.1)
+
+    expected_tau = expected_rng.gamma(shape=1.5, scale=1.0 / 0.1, size=4)
+    expected_sigmas = np.sqrt(1.0 / expected_tau)
+    np.testing.assert_allclose(sigmas, expected_sigmas, rtol=1e-8)
+
+
 def test_p_within_multiplier_is_mean_of_cdf_for_fixed_sigma(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,3 +259,59 @@ def test_probability_finish_by_due_matches_manual_calculation(
         FD = lognormal_cdf(D, median=1.0, sigma=s)
         expected.append((FD - Ft) / (1.0 - Ft))
     assert isclose(prob, sum(expected) / len(expected), rel_tol=1e-12)
+
+
+def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    calls = []
+
+    def fake_sample_sigma(
+        self, n=50000, rng=None, alpha: float = 0.0, beta: float = 0.0
+    ):
+        calls.append((n, alpha, beta))
+        return np.array([1.0])
+
+    def fake_brent_root(fn, left, right):
+        assert left == 0.01 and right == 10.0
+        fn(0.5)  # exercise objective once
+        return 0.5
+
+    monkeypatch.setattr(DeveloperDurationModel, "sample_sigma", fake_sample_sigma)
+    monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
+
+    alpha0, beta0 = model.fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=0)
+
+    assert isclose(alpha0, 1.0)
+    assert isclose(beta0, 0.5)
+    assert model.alpha0 == alpha0 and model.beta0 == beta0
+    assert calls == [(80000, 1.0, 0.5)]
+
+
+def test_fit_inv_gamma_prior_for_large_prior_equiv_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    calls = []
+
+    def fake_sample_sigma(
+        self, n=50000, rng=None, alpha: float = 0.0, beta: float = 0.0
+    ):
+        calls.append((n, alpha, beta))
+        return np.array([0.8, 1.2])
+
+    def fake_brent_root(fn, left, right):
+        fn(2.5)
+        return 2.5
+
+    monkeypatch.setattr(DeveloperDurationModel, "sample_sigma", fake_sample_sigma)
+    monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
+
+    alpha0, beta0 = model.fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=20)
+
+    expected_alpha0 = 1.0 + 20 / 2.0  # 1 + n / 2
+    assert isclose(alpha0, expected_alpha0)
+    assert isclose(beta0, 2.5)
+    assert model.alpha0 == alpha0 and model.beta0 == beta0
+    assert calls == [(80000, expected_alpha0, 2.5)]

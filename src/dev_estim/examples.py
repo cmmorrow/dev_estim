@@ -37,3 +37,21 @@ p_due = dev.probability_finish_by_due(
     n_samples=80000,
 )
 print(f"\nExample P(finish by due | still in progress today): {p_due:.3f}")
+
+
+# ---- example: build your calibrated prior ----
+dev = DeveloperDurationModel()
+alpha0, beta0 = dev.fit_inv_gamma_prior_for_multiplier(
+    multiplier=1.5,
+    target_prob=0.8,
+    prior_equiv_tasks=4,  # weak-to-moderate prior
+)
+
+print("Calibrated prior:")
+print(f"  alpha0 = {alpha0:.3f}")
+print(f"  beta0  = {beta0:.3f}")
+
+# Sanity check
+dev = DeveloperDurationModel(alpha0=alpha0, beta0=beta0)
+p_check = dev.p_within_multiplier(multiplier=0.5, n_samples=200000)
+print(f"Prior-predictive P(within 1.5×) ≈ {p_check:.3f}")

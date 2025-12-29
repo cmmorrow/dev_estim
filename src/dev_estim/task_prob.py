@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from dev_estim.utils import brent_root
+
 # -----------------------------
 # Working-day math (due exclusive)
 # -----------------------------
@@ -40,6 +42,7 @@ def lognormal_cdf(x: float, median: float, sigma: float) -> float:
 # -----------------------------
 # Story points -> working days
 # -----------------------------
+
 
 def _load_points_to_days() -> Dict[int, float]:
     json_path = Path(__file__).with_name("points_to_days.json")
@@ -95,10 +98,15 @@ class DeveloperDurationModel:
         self._eps.append(eps)
 
     def sample_sigma(
-        self, n: int = 50000, rng: Optional[np.random.Generator] = None
+        self,
+        n: int = 50000,
+        rng: Optional[np.random.Generator] = None,
+        alpha: float = 0.0,
+        beta: float = 0.0,
     ) -> np.ndarray:
         rng = rng or np.random.default_rng()
-        alpha, beta = self.posterior_params()
+        if alpha == 0 and beta == 0:
+            alpha, beta = self.posterior_params()
         # If sigma^2 ~ InvGamma(alpha,beta), then precision tau=1/sigma^2 ~ Gamma(alpha, rate=beta)
         tau = rng.gamma(shape=alpha, scale=1.0 / beta, size=n)
         return np.sqrt(1.0 / tau)
@@ -110,6 +118,29 @@ class DeveloperDurationModel:
         """
         sig = self.sample_sigma(n_samples)
         return float(np.mean([normal_cdf(log(multiplier) / s) for s in sig]))
+
+    def fit_inv_gamma_prior_for_multiplier(
+        self,
+        multiplier: float = 1.5,
+        target_prob: float = 0.8,
+        prior_equiv_tasks: int = 4,
+    ) -> Tuple[float, float]:
+        """
+        Returns (alpha0, beta0) such that
+        E[ Phi( ln(multiplier) / sigma ) ] ≈ target_prob
+        """
+        alpha0 = 1.0 + prior_equiv_tasks / 2.0
+
+        def objective(beta0) -> float:
+            sigma = self.sample_sigma(n=80000, alpha=alpha0, beta=beta0)
+            p = float(np.mean([normal_cdf(log(multiplier) / s) for s in sigma]))
+            return p - target_prob
+
+        # Reasonable search interval for beta0
+        beta0 = brent_root(objective, 0.01, 10.0)
+        self.alpha0 = alpha0
+        self.beta0 = beta0
+        return alpha0, beta0
 
     def probability_finish_by_due(
         self,
