@@ -1,6 +1,6 @@
 [project]
 name = "dev-estim"
-version = "0.2.0"
+version = "0.3.1"
 description = "A python library for managing and measuring software engineering efficiency"
 readme = "README.md"
 authors = [
@@ -8,12 +8,15 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2.4.0",
+    "numpy>=2.4.1",
 ]
 
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.uv-build]
+  packages = [{ include = "dev_estim", from = "src" }]
 
 [dependency-groups]
 tests = [

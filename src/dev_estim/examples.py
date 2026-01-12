@@ -18,10 +18,10 @@ records = [
 for pts, actual in records:
     dev.add_completed(pts, actual)
 
-alpha_n, beta_n = dev.posterior_params()
+mu_n, kappa_n, alpha_n, beta_n = dev.posterior_params()
 print("Posterior InvGamma params for sigma^2:")
-print(f"  alpha={alpha_n:.3f}, beta={beta_n:.3f}")
-print(f"  completed tasks: n={dev.n_completed}, sum_sq={dev.sum_sq:.3f}")
+print(f"  alpha={alpha_n:.3f}, beta={beta_n:.3f}, mu={mu_n:.3f}, kappa={kappa_n:.3f}")
+print(f"  completed tasks: n={dev.n_completed}, sum_sq={dev.sum_r2:.3f}")
 
 # Sanity check: implied P(within 1.5x estimate) under posterior predictive
 p_15x = dev.p_within_multiplier(1.5, n_samples=80000)

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
-from math import erf, log, sqrt
+from math import erf, exp, log, sqrt
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from dev_estim.utils import brent_root
+from dev_estim.utils import brent_root, normal_quantile
+
+# Sentinel value intended for determining if a user provided parameter is missing
+MISSING: float = float("nan")
 
 # -----------------------------
 # Working-day math (due exclusive)
@@ -32,10 +35,10 @@ def normal_cdf(z: float) -> float:
     return 0.5 * (1.0 + erf(z / sqrt(2.0)))
 
 
-def lognormal_cdf(x: float, median: float, sigma: float) -> float:
+def lognormal_cdf(x: float, median: float, sigma: float, bias: float = 0.0) -> float:
     if x <= 0:
         return 0.0
-    z = (log(x) - log(median)) / sigma
+    z = (log(x) - (log(median) + bias)) / sigma
     return normal_cdf(z)
 
 
@@ -81,49 +84,77 @@ class DeveloperDurationModel:
       beta_n  = beta0  + sum_sq/2
     """
 
+    # prior hyperparameters
     alpha0: float = 2.0
     beta0: float = 0.2
-    n_completed: int = 0
-    sum_sq: float = 0.0
-    _eps: List[float] = field(default_factory=list)
+    mu0: float = 0.0
+    kappa0: float = 4.0
 
-    def posterior_params(self) -> Tuple[float, float]:
-        return (self.alpha0 + 0.5 * self.n_completed, self.beta0 + 0.5 * self.sum_sq)
+    n_completed: int = 0
+    sum_r: float = 0.0
+    sum_r2: float = 0.0
+    # _eps: List[float] = field(default_factory=list)
+
+    # def posterior_params(self) -> Tuple[float, float]:
+    #     return (self.alpha0 + 0.5 * self.n_completed, self.beta0 + 0.5 * self.sum_r2)
+    #
+    def posterior_params(self) -> Tuple[float, float, float, float]:
+        n = self.n_completed
+        if n == 0:
+            return (self.mu0, self.kappa0, self.alpha0, self.beta0)
+        rbar = self.sum_r / n
+        sse = self.sum_r2 - n * (rbar * rbar)
+
+        kappa = self.kappa0 + n
+        mu = (self.kappa0 * self.mu0 + n * rbar) / kappa
+        alpha = self.alpha0 + 0.5 * n
+        beta = (
+            self.beta0
+            + 0.5 * sse
+            + (self.kappa0 * n * (rbar - self.mu0) ** 2) / (2.0 * kappa)
+        )
+        return mu, kappa, alpha, beta
 
     def add_completed(self, points: int, actual_working_days: float) -> None:
         m = estimate_days(points)
         eps = log(actual_working_days / m)
         self.n_completed += 1
-        self.sum_sq += eps * eps
-        self._eps.append(eps)
+        self.sum_r += eps
+        self.sum_r2 += eps * eps
+        # self._eps.append(eps)
 
-    def sample_sigma(
+    def sample_bias_and_sigma(
         self,
         n: int = 50000,
         rng: Optional[np.random.Generator] = None,
-        alpha: float = 0.0,
-        beta: float = 0.0,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Draw samples from the posterior:
+            sigma_total^2 ~ InvGamma(alpha, beta)
+            b | sigma_total^2 ~ Normal(mu, sigma_total^2/kappa)
+        """
         rng = rng or np.random.default_rng()
-        if alpha == 0 and beta == 0:
-            alpha, beta = self.posterior_params()
+        mu, kappa, alpha, beta = self.posterior_params()
         # If sigma^2 ~ InvGamma(alpha,beta), then precision tau=1/sigma^2 ~ Gamma(alpha, rate=beta)
         tau = rng.gamma(shape=alpha, scale=1.0 / beta, size=n)
-        return np.sqrt(1.0 / tau)
+        sigma2 = 1.0 / tau
+        sigma = np.sqrt(sigma2)
+        bias = rng.normal(loc=mu, scale=np.sqrt(sigma2 / kappa), size=n)
+        return bias, sigma
 
     def p_within_multiplier(self, multiplier: float, n_samples: int = 50000) -> float:
         """
         Posterior-predictive P(T <= multiplier * m) for a fresh task (t=0),
         which depends only on sigma via: Phi(ln(multiplier)/sigma).
         """
-        sig = self.sample_sigma(n_samples)
+        _, sig = self.sample_bias_and_sigma(n_samples)
         return float(np.mean([normal_cdf(log(multiplier) / s) for s in sig]))
 
     def fit_inv_gamma_prior_for_multiplier(
         self,
         multiplier: float = 1.5,
         target_prob: float = 0.8,
-        prior_equiv_tasks: int = 4,
+        prior_equiv_tasks: int = 1,
     ) -> Tuple[float, float]:
         """
         Returns (alpha0, beta0) such that
@@ -132,7 +163,9 @@ class DeveloperDurationModel:
         alpha0 = 1.0 + prior_equiv_tasks / 2.0
 
         def objective(beta0) -> float:
-            sigma = self.sample_sigma(n=80000, alpha=alpha0, beta=beta0)
+            rng = np.random.default_rng()
+            tau = rng.gamma(shape=alpha0, scale=1.0 / beta0, size=80000)
+            sigma = np.sqrt(1.0 / tau)
             p = float(np.mean([normal_cdf(log(multiplier) / s) for s in sigma]))
             return p - target_prob
 
@@ -141,6 +174,12 @@ class DeveloperDurationModel:
         self.alpha0 = alpha0
         self.beta0 = beta0
         return alpha0, beta0
+
+    def realistic_estimated_days(
+        self, H: float, sigma: float, bias: float = 0.0, p: float = 0.95
+    ) -> float:
+        z = normal_quantile(p)
+        return H / exp(bias + z * sigma)
 
     def probability_finish_by_due(
         self,
@@ -153,6 +192,9 @@ class DeveloperDurationModel:
         """
         P(T <= D | T > t, developer data), with D and t in working days.
         Due is exclusive because working_days_between uses [start, due).
+
+        T modeled as LogNormal(mu=ln(m)+b, sigma_total).
+        We sample (b, sigma_total) from posterior, then compute conditional probability.
         """
         if today < start:
             raise ValueError("today must be >= start")
@@ -166,11 +208,11 @@ class DeveloperDurationModel:
         if D <= t:
             return 0.0
 
-        sig = self.sample_sigma(n_samples)
+        bias, sigma = self.sample_bias_and_sigma(n_samples)
         probs = []
-        for s in sig:
-            Ft = lognormal_cdf(t, median=m, sigma=s)
-            FD = lognormal_cdf(D, median=m, sigma=s)
+        for b, s in zip(bias, sigma):
+            Ft = lognormal_cdf(t, median=m, sigma=s, bias=b)
+            FD = lognormal_cdf(D, median=m, sigma=s, bias=b)
             denom = 1.0 - Ft
             probs.append(0.0 if denom <= 1e-12 else max(0.0, (FD - Ft) / denom))
         return float(np.mean(probs))

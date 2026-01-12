@@ -1,3 +1,4 @@
+import math
 from datetime import date
 from math import isclose, log
 
@@ -11,6 +12,7 @@ from dev_estim.task_prob import (
     normal_cdf,
     working_days_between,
 )
+from dev_estim.utils import normal_quantile
 
 
 def test_returns_zero_for_same_start_and_end_date() -> None:
@@ -44,8 +46,17 @@ def test_add_completed_updates_counts_and_residuals() -> None:
 
     expected_eps = log(2.0 / 1.0)  # estimate_days(2) = 1.0
     assert model.n_completed == 1
-    assert isclose(model.sum_sq, expected_eps * expected_eps, rel_tol=1e-9)
-    assert len(model._eps) == 1 and isclose(model._eps[0], expected_eps, rel_tol=1e-9)
+    assert isclose(model.sum_r, expected_eps, rel_tol=1e-9)
+    assert isclose(model.sum_r2, expected_eps * expected_eps, rel_tol=1e-9)
+
+
+def test_posterior_params_returns_priors_when_no_data() -> None:
+    model = DeveloperDurationModel(alpha0=1.1, beta0=0.3, mu0=0.2, kappa0=5.0)
+    mu, kappa, alpha, beta = model.posterior_params()
+    assert mu == 0.2
+    assert kappa == 5.0
+    assert alpha == 1.1
+    assert beta == 0.3
 
 
 def test_posterior_params_accumulates_updates() -> None:
@@ -53,12 +64,21 @@ def test_posterior_params_accumulates_updates() -> None:
     model.add_completed(points=3, actual_working_days=6.0)  # estimate_days(3) = 2.0
     model.add_completed(points=1, actual_working_days=0.5)  # eps = 0
 
-    alpha, beta = model.posterior_params()
-    expected_eps = log(3.0)  # log(6/2)
-    expected_sum_sq = expected_eps * expected_eps  # second update adds zero
+    mu, kappa, alpha, beta = model.posterior_params()
+    eps = log(3.0)  # log(6/2)
+    rbar = eps / 2
+    expected_mu = (model.kappa0 * model.mu0 + 2 * rbar) / (model.kappa0 + 2)
+    sse = eps * eps - 2 * (rbar * rbar)
+    expected_beta = (
+        model.beta0
+        + 0.5 * sse
+        + (model.kappa0 * 2 * (rbar - model.mu0) ** 2) / (2 * (model.kappa0 + 2))
+    )
 
     assert isclose(alpha, 3.0, rel_tol=1e-9)
-    assert isclose(beta, 0.2 + 0.5 * expected_sum_sq, rel_tol=1e-9)
+    assert isclose(kappa, model.kappa0 + 2, rel_tol=1e-9)
+    assert isclose(mu, expected_mu, rel_tol=1e-9)
+    assert isclose(beta, expected_beta, rel_tol=1e-9)
 
 
 @pytest.mark.parametrize("invalid_points", [-1, 0, 4, 7])
@@ -69,7 +89,7 @@ def test_add_completed_rejects_invalid_points(invalid_points: int) -> None:
 
 
 def test_posterior_params_with_custom_prior_values() -> None:
-    model = DeveloperDurationModel(alpha0=0.1, beta0=0.05)
+    model = DeveloperDurationModel(alpha0=0.1, beta0=0.05, mu0=0.2, kappa0=2.0)
     model.add_completed(
         points=1, actual_working_days=0.5
     )  # matches estimate -> eps = 0
@@ -77,12 +97,17 @@ def test_posterior_params_with_custom_prior_values() -> None:
         points=5, actual_working_days=10.0
     )  # estimate_days(5)=5 -> eps=ln(2)
 
-    alpha, beta = model.posterior_params()
-    expected_eps = log(2.0)
-    expected_sum_sq = expected_eps * expected_eps
+    mu, kappa, alpha, beta = model.posterior_params()
+
+    rbar = log(2.0) / 2
+    sse = (log(2.0) ** 2) - 2 * (rbar * rbar)
+    expected_mu = (2.0 * 0.2 + 2 * rbar) / (2.0 + 2)
+    expected_beta = 0.05 + 0.5 * sse + (2.0 * 2 * (rbar - 0.2) ** 2) / (2 * (2.0 + 2))
 
     assert isclose(alpha, 0.1 + 1.0, rel_tol=1e-9)  # alpha0 + n/2 with n=2
-    assert isclose(beta, 0.05 + 0.5 * expected_sum_sq, rel_tol=1e-9)
+    assert isclose(kappa, 4.0, rel_tol=1e-9)
+    assert isclose(mu, expected_mu, rel_tol=1e-9)
+    assert isclose(beta, expected_beta, rel_tol=1e-9)
 
 
 def test_posterior_params_matches_reference_dataset() -> None:
@@ -98,14 +123,26 @@ def test_posterior_params_matches_reference_dataset() -> None:
     for pts, actual in records:
         model.add_completed(points=pts, actual_working_days=actual)
 
-    alpha, beta = model.posterior_params()
+    mu, kappa, alpha, beta = model.posterior_params()
+    # expected values computed with the same formulas as posterior_params
+    eps = [log(actual / task_prob.estimate_days(pts)) for pts, actual in records]
+    rbar = sum(eps) / len(eps)
+    sse = sum(e * e for e in eps) - len(eps) * (rbar * rbar)
+    expected_mu = (model.kappa0 * model.mu0 + len(eps) * rbar) / (model.kappa0 + len(eps))
+    expected_beta = (
+        model.beta0
+        + 0.5 * sse
+        + (model.kappa0 * len(eps) * (rbar - model.mu0) ** 2) / (2 * (model.kappa0 + len(eps)))
+    )
 
     assert isclose(alpha, 4.5, rel_tol=1e-12)
-    assert isclose(beta, 1.224934034575764, rel_tol=1e-12)
+    assert isclose(kappa, model.kappa0 + len(eps), rel_tol=1e-12)
+    assert isclose(mu, expected_mu, rel_tol=1e-12)
+    assert isclose(beta, expected_beta, rel_tol=1e-12)
 
 
 def test_posterior_params_integration_with_custom_prior() -> None:
-    model = DeveloperDurationModel(alpha0=1.5, beta0=0.1)
+    model = DeveloperDurationModel(alpha0=1.5, beta0=0.1, mu0=0.1, kappa0=3.0)
     records = [
         (2, 1.0),
         (8, 15.0),  # 1.5x estimate -> small positive eps
@@ -115,56 +152,92 @@ def test_posterior_params_integration_with_custom_prior() -> None:
     for pts, actual in records:
         model.add_completed(points=pts, actual_working_days=actual)
 
-    alpha, beta = model.posterior_params()
-
-    assert isclose(alpha, 3.0, rel_tol=1e-12)
-    assert isclose(beta, 0.4224274839056834, rel_tol=1e-12)
-
-
-def test_sample_sigma_uses_given_rng_and_is_positive() -> None:
-    rng = np.random.default_rng(123)
-    model = DeveloperDurationModel()
-
-    sigmas = model.sample_sigma(n=3, rng=rng)
-
-    assert sigmas.shape == (3,)
-    assert np.all(sigmas > 0)
-    np.testing.assert_allclose(
-        sigmas, np.array([0.53913479, 0.22520074, 0.25160473]), rtol=1e-8
+    mu, kappa, alpha, beta = model.posterior_params()
+    eps = [log(actual / task_prob.estimate_days(pts)) for pts, actual in records]
+    rbar = sum(eps) / len(eps)
+    sse = sum(e * e for e in eps) - len(eps) * (rbar * rbar)
+    expected_mu = (3.0 * 0.1 + len(eps) * rbar) / (3.0 + len(eps))
+    expected_beta = (
+        0.1
+        + 0.5 * sse
+        + (3.0 * len(eps) * (rbar - 0.1) ** 2) / (2 * (3.0 + len(eps)))
     )
 
+    assert isclose(alpha, 1.5 + len(records) / 2, rel_tol=1e-12)
+    assert isclose(kappa, 3.0 + len(records), rel_tol=1e-12)
+    assert isclose(mu, expected_mu, rel_tol=1e-12)
+    assert isclose(beta, expected_beta, rel_tol=1e-12)
 
-def test_sample_sigma_allows_zero_samples() -> None:
+
+def test_sample_bias_and_sigma_uses_given_rng_and_shapes() -> None:
+    rng = np.random.default_rng(123)
+    model = DeveloperDurationModel()
+    model.add_completed(points=2, actual_working_days=2.0)
+
+    bias, sigmas = model.sample_bias_and_sigma(n=3, rng=rng)
+
+    assert bias.shape == (3,)
+    assert sigmas.shape == (3,)
+    assert np.all(sigmas > 0)
+
+
+def test_sample_bias_and_sigma_zero_samples() -> None:
     rng = np.random.default_rng(42)
     model = DeveloperDurationModel()
+    model.add_completed(points=2, actual_working_days=2.0)
 
-    sigmas = model.sample_sigma(n=0, rng=rng)
+    bias, sigmas = model.sample_bias_and_sigma(n=0, rng=rng)
 
+    assert bias.shape == (0,)
     assert sigmas.shape == (0,)
 
 
-def test_sample_sigma_accepts_explicit_alpha_beta() -> None:
+def test_sample_bias_and_sigma_works_with_no_completed_tasks() -> None:
+    rng = np.random.default_rng(11)
+    model = DeveloperDurationModel(alpha0=2.5, beta0=0.4, mu0=0.1, kappa0=3.0)
+
+    bias, sigmas = model.sample_bias_and_sigma(n=2, rng=rng)
+
+    assert bias.shape == (2,)
+    assert sigmas.shape == (2,)
+    # Expected draw from the priors (mu0, alpha0, beta0, kappa0)
+    expected_rng = np.random.default_rng(11)
+    tau = expected_rng.gamma(shape=2.5, scale=1.0 / 0.4, size=2)
+    sigma2 = 1.0 / tau
+    expected_sigmas = np.sqrt(sigma2)
+    expected_bias = expected_rng.normal(loc=0.1, scale=np.sqrt(sigma2 / 3.0), size=2)
+    np.testing.assert_allclose(sigmas, expected_sigmas, rtol=1e-8)
+    np.testing.assert_allclose(bias, expected_bias, rtol=1e-8)
+
+
+def test_sample_bias_and_sigma_respects_posterior_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = DeveloperDurationModel()
     rng = np.random.default_rng(7)
     expected_rng = np.random.default_rng(7)
-    model = DeveloperDurationModel()
 
-    sigmas = model.sample_sigma(n=4, rng=rng, alpha=1.5, beta=0.1)
+    monkeypatch.setattr(model, "posterior_params", lambda: (1.0, 2.0, 3.0, 0.4))
 
-    expected_tau = expected_rng.gamma(shape=1.5, scale=1.0 / 0.1, size=4)
-    expected_sigmas = np.sqrt(1.0 / expected_tau)
+    bias, sigmas = model.sample_bias_and_sigma(n=4, rng=rng)
+
+    tau = expected_rng.gamma(shape=3.0, scale=1.0 / 0.4, size=4)
+    sigma2 = 1.0 / tau
+    expected_sigmas = np.sqrt(sigma2)
+    expected_bias = expected_rng.normal(loc=1.0, scale=np.sqrt(sigma2 / 2.0), size=4)
     np.testing.assert_allclose(sigmas, expected_sigmas, rtol=1e-8)
+    np.testing.assert_allclose(bias, expected_bias, rtol=1e-8)
 
 
 def test_p_within_multiplier_is_mean_of_cdf_for_fixed_sigma(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = DeveloperDurationModel()
+    fixed_bias = np.array([0.0, 0.0])
     fixed_sigmas = np.array([0.5, 1.0])
 
-    def _fake_sample_sigma(n_samples: int, rng=None):  # type: ignore[override]
-        return fixed_sigmas
+    def _fake_sample_bias_and_sigma(n_samples: int, rng=None):  # type: ignore[override]
+        return fixed_bias, fixed_sigmas
 
-    monkeypatch.setattr(model, "sample_sigma", _fake_sample_sigma)
+    monkeypatch.setattr(model, "sample_bias_and_sigma", _fake_sample_bias_and_sigma)
 
     prob = model.p_within_multiplier(multiplier=1.0, n_samples=2)
     assert isclose(prob, 0.5, rel_tol=1e-12)
@@ -174,9 +247,12 @@ def test_p_within_multiplier_handles_multiplier_below_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = DeveloperDurationModel()
+    fixed_bias = np.array([0.0])
     fixed_sigmas = np.array([0.5])
 
-    monkeypatch.setattr(model, "sample_sigma", lambda n_samples, rng=None: fixed_sigmas)
+    monkeypatch.setattr(
+        model, "sample_bias_and_sigma", lambda n_samples, rng=None: (fixed_bias, fixed_sigmas)
+    )
 
     prob = model.p_within_multiplier(multiplier=0.5, n_samples=1)
     expected = normal_cdf(log(0.5) / fixed_sigmas[0])
@@ -188,7 +264,7 @@ def test_p_within_multiplier_raises_for_non_positive_multiplier(
 ) -> None:
     model = DeveloperDurationModel()
     monkeypatch.setattr(
-        model, "sample_sigma", lambda n_samples, rng=None: np.array([1.0])
+        model, "sample_bias_and_sigma", lambda n_samples, rng=None: (np.array([0.0]), np.array([1.0]))
     )
 
     with pytest.raises(ValueError):
@@ -241,10 +317,13 @@ def test_probability_finish_by_due_matches_manual_calculation(
     start = date(2024, 12, 2)  # Monday
     today = date(2024, 12, 3)  # Tuesday -> t = 1 working day
     due = date(2024, 12, 6)  # Friday (exclusive) -> D = 4 working days
+    fixed_bias = np.array([0.1, -0.2])
     fixed_sigmas = np.array([0.5, 1.0])
 
     monkeypatch.setattr(
-        model, "sample_sigma", lambda n_samples=0, rng=None: fixed_sigmas
+        model,
+        "sample_bias_and_sigma",
+        lambda n_samples=0, rng=None: (fixed_bias, fixed_sigmas),
     )
 
     prob = model.probability_finish_by_due(
@@ -254,58 +333,88 @@ def test_probability_finish_by_due_matches_manual_calculation(
     t = float(working_days_between(start, today))
     D = float(working_days_between(start, due))
     expected = []
-    for s in fixed_sigmas:
-        Ft = lognormal_cdf(t, median=1.0, sigma=s)
-        FD = lognormal_cdf(D, median=1.0, sigma=s)
+    for b, s in zip(fixed_bias, fixed_sigmas):
+        Ft = lognormal_cdf(t, median=1.0, sigma=s, bias=b)
+        FD = lognormal_cdf(D, median=1.0, sigma=s, bias=b)
         expected.append((FD - Ft) / (1.0 - Ft))
     assert isclose(prob, sum(expected) / len(expected), rel_tol=1e-12)
+
+
+@pytest.mark.parametrize("H", [1.0, 3.5, 10.0])
+def test_realistic_estimated_days_matches_formula_with_zero_bias(H: float) -> None:
+    model = DeveloperDurationModel()
+    z = normal_quantile(0.95)
+    expected = H / math.exp(z * 0.5)
+    assert isclose(
+        model.realistic_estimated_days(H=H, sigma=0.5, bias=0.0, p=0.95),
+        expected,
+        rel_tol=0,
+        abs_tol=1e-12,
+    )
+
+
+def test_realistic_estimated_days_scales_with_positive_bias_and_sigma() -> None:
+    model = DeveloperDurationModel()
+    z = normal_quantile(0.95)
+    expected = 8.0 / math.exp(0.2 + z * 0.5)
+    assert isclose(
+        model.realistic_estimated_days(H=8.0, sigma=0.5, bias=0.2, p=0.95),
+        expected,
+        rel_tol=0,
+        abs_tol=1e-12,
+    )
+
+
+def test_realistic_estimated_days_scales_with_negative_bias_and_sigma() -> None:
+    model = DeveloperDurationModel()
+    z = normal_quantile(0.9)
+    expected = 5.0 / math.exp(-0.3 + z * 0.8)
+    assert isclose(
+        model.realistic_estimated_days(H=5.0, sigma=0.8, bias=-0.3, p=0.9),
+        expected,
+        rel_tol=0,
+        abs_tol=1e-12,
+    )
+
+
+def test_realistic_estimated_days_uses_p_quantile() -> None:
+    model = DeveloperDurationModel()
+    # p=0.5 -> z=0, so result should equal H/exp(bias)
+    expected = 7.0 / math.exp(1.0)
+    assert isclose(
+        model.realistic_estimated_days(H=7.0, sigma=1.2, bias=1.0, p=0.5), expected
+    )
 
 
 def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = DeveloperDurationModel()
-    calls = []
-
-    def fake_sample_sigma(
-        self, n=50000, rng=None, alpha: float = 0.0, beta: float = 0.0
-    ):
-        calls.append((n, alpha, beta))
-        return np.array([1.0])
 
     def fake_brent_root(fn, left, right):
         assert left == 0.01 and right == 10.0
-        fn(0.5)  # exercise objective once
+        # Call objective once to ensure it runs without error
+        fn(0.5)
         return 0.5
 
-    monkeypatch.setattr(DeveloperDurationModel, "sample_sigma", fake_sample_sigma)
     monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
 
     alpha0, beta0 = model.fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=0)
 
-    assert isclose(alpha0, 1.0)
+    assert isclose(alpha0, 1.0)  # 1 + prior_equiv_tasks/2 with prior_equiv_tasks=0
     assert isclose(beta0, 0.5)
     assert model.alpha0 == alpha0 and model.beta0 == beta0
-    assert calls == [(80000, 1.0, 0.5)]
 
 
 def test_fit_inv_gamma_prior_for_large_prior_equiv_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = DeveloperDurationModel()
-    calls = []
-
-    def fake_sample_sigma(
-        self, n=50000, rng=None, alpha: float = 0.0, beta: float = 0.0
-    ):
-        calls.append((n, alpha, beta))
-        return np.array([0.8, 1.2])
 
     def fake_brent_root(fn, left, right):
         fn(2.5)
         return 2.5
 
-    monkeypatch.setattr(DeveloperDurationModel, "sample_sigma", fake_sample_sigma)
     monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
 
     alpha0, beta0 = model.fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=20)
@@ -314,4 +423,3 @@ def test_fit_inv_gamma_prior_for_large_prior_equiv_tasks(
     assert isclose(alpha0, expected_alpha0)
     assert isclose(beta0, 2.5)
     assert model.alpha0 == alpha0 and model.beta0 == beta0
-    assert calls == [(80000, expected_alpha0, 2.5)]
