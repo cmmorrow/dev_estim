@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from math import erf, exp, log, sqrt
+from math import erf, log, sqrt
 from typing import Optional, Tuple
 
 import numpy as np
 
 from dev_estim.utils import brent_root, normal_quantile
-
-# Sentinel value intended for determining if a user provided parameter is missing
-MISSING: float = float("nan")
 
 # -----------------------------
 # Working-day math (due exclusive)
@@ -86,6 +83,13 @@ class DeveloperDurationModel:
 def posterior_params(
     model: DeveloperDurationModel,
 ) -> Tuple[float, float, float, float]:
+    """
+    Posterior parameters for the Normal–Inverse-Gamma on (bias, sigma^2):
+      mu, kappa, alpha, beta where
+        bias | sigma^2 ~ Normal(mu, sigma^2 / kappa)
+        sigma^2        ~ InvGamma(alpha, beta)
+    Returns prior hyperparameters when no completed tasks are present.
+    """
     n = model.n_completed
     if n == 0:
         return (model.mu0, model.kappa0, model.alpha0, model.beta0)
@@ -134,7 +138,7 @@ def p_within_multiplier(
     return float(np.mean([normal_cdf(log(multiplier) / s) for s in sig]))
 
 
-def fit_inv_gamma_prior_for_multiplier(
+def calibrate_prior(
     multiplier: float = 1.5,
     target_prob: float = 0.8,
     prior_equiv_tasks: int = 1,
@@ -155,8 +159,6 @@ def fit_inv_gamma_prior_for_multiplier(
 
     # Reasonable search interval for beta0
     beta0 = brent_root(objective, 0.01, 10.0)
-    # self.alpha0 = alpha0
-    # self.beta0 = beta0
     return alpha0, beta0
 
 
@@ -196,8 +198,13 @@ def probability_finish_by_due(
     return float(np.mean(probs))
 
 
-def realistic_estimated_days(
-    H: float, sigma: float, bias: float = 0.0, p: float = 0.95
+def task_duration_estimated_days(
+    model: DeveloperDurationModel,
+    H: float,
+    p: float = 0.95,
+    n_samples: int = 50000,
 ) -> float:
     z = normal_quantile(p)
-    return H / exp(bias + z * sigma)
+    bias, sigma = sample_bias_and_sigma(model, n=n_samples)
+    estimates = H / np.exp(bias + z * sigma)
+    return float(np.percentile(estimates, 10))

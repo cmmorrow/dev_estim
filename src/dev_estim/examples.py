@@ -2,7 +2,7 @@ from datetime import date
 
 from dev_estim.task_prob import (
     DeveloperDurationModel,
-    fit_inv_gamma_prior_for_multiplier,
+    calibrate_prior,
     p_within_multiplier,
     posterior_params,
     probability_finish_by_due,
@@ -48,7 +48,7 @@ print(f"\nExample P(finish by due | still in progress today): {p_due:.3f}")
 
 # ---- example: build your calibrated prior ----
 dev = DeveloperDurationModel()
-alpha0, beta0 = fit_inv_gamma_prior_for_multiplier(
+alpha0, beta0 = calibrate_prior(
     multiplier=1.5,
     target_prob=0.8,
     prior_equiv_tasks=4,  # weak-to-moderate prior

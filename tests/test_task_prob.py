@@ -1,4 +1,3 @@
-import math
 from datetime import date
 from math import isclose, log
 
@@ -8,14 +7,14 @@ import pytest
 import dev_estim.task_prob as task_prob
 from dev_estim.task_prob import (
     DeveloperDurationModel,
-    fit_inv_gamma_prior_for_multiplier,
+    calibrate_prior,
     lognormal_cdf,
     normal_cdf,
     p_within_multiplier,
     posterior_params,
     probability_finish_by_due,
-    realistic_estimated_days,
     sample_bias_and_sigma,
+    task_duration_estimated_days,
     working_days_between,
 )
 from dev_estim.utils import normal_quantile
@@ -346,45 +345,72 @@ def test_probability_finish_by_due_matches_manual_calculation(
     assert isclose(prob, sum(expected) / len(expected), rel_tol=1e-12)
 
 
-@pytest.mark.parametrize("H", [1.0, 3.5, 10.0])
-def test_realistic_estimated_days_matches_formula_with_zero_bias(H: float) -> None:
+def test_realistic_estimated_days_percentile_with_zero_bias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
     z = normal_quantile(0.95)
-    expected = H / math.exp(z * 0.5)
+    bias = np.zeros(5)
+    sigma = np.full(5, 0.5)
+
+    monkeypatch.setattr(
+        task_prob, "sample_bias_and_sigma", lambda m, n=50000: (bias, sigma)
+    )
+
+    expected_samples = 3.0 / np.exp(bias + z * sigma)
+    expected = np.percentile(expected_samples, 10)
+
     assert isclose(
-        realistic_estimated_days(H=H, sigma=0.5, bias=0.0, p=0.95),
+        task_duration_estimated_days(model, H=3.0, p=0.95, n_samples=5),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
     )
 
 
-def test_realistic_estimated_days_scales_with_positive_bias_and_sigma() -> None:
-    z = normal_quantile(0.95)
-    expected = 8.0 / math.exp(0.2 + z * 0.5)
-    assert isclose(
-        realistic_estimated_days(H=8.0, sigma=0.5, bias=0.2, p=0.95),
-        expected,
-        rel_tol=0,
-        abs_tol=1e-12,
-    )
-
-
-def test_realistic_estimated_days_scales_with_negative_bias_and_sigma() -> None:
+def test_realistic_estimated_days_handles_varied_bias_and_sigma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
     z = normal_quantile(0.9)
-    expected = 5.0 / math.exp(-0.3 + z * 0.8)
+    bias = np.array([-0.2, 0.1, 0.3, -0.1])
+    sigma = np.array([0.4, 0.6, 0.5, 0.7])
+
+    monkeypatch.setattr(
+        task_prob, "sample_bias_and_sigma", lambda m, n=50000: (bias, sigma)
+    )
+
+    samples = 5.0 / np.exp(bias + z * sigma)
+    expected = np.percentile(samples, 10)
+
     assert isclose(
-        realistic_estimated_days(H=5.0, sigma=0.8, bias=-0.3, p=0.9),
+        task_duration_estimated_days(model, H=5.0, p=0.9, n_samples=4),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
     )
 
 
-def test_realistic_estimated_days_uses_p_quantile() -> None:
-    # p=0.5 -> z=0, so result should equal H/exp(bias)
-    expected = 7.0 / math.exp(1.0)
+def test_realistic_estimated_days_respects_p_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = DeveloperDurationModel()
+    # p=0.5 -> z=0, so percentile should ignore sigma and depend only on bias
+    bias = np.array([0.0, 0.5, -0.5, 1.0])
+    sigma = np.ones_like(bias)
+
+    monkeypatch.setattr(
+        task_prob, "sample_bias_and_sigma", lambda m, n=50000: (bias, sigma)
+    )
+
+    samples = 7.0 / np.exp(bias)  # z=0 => multiplier uses only bias
+    expected = np.percentile(samples, 10)
+
     assert isclose(
-        realistic_estimated_days(H=7.0, sigma=1.2, bias=1.0, p=0.5), expected
+        task_duration_estimated_days(model, H=7.0, p=0.5, n_samples=len(bias)),
+        expected,
+        rel_tol=0,
+        abs_tol=1e-12,
     )
 
 
@@ -399,7 +425,7 @@ def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(
 
     monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
 
-    alpha0, beta0 = fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=0)
+    alpha0, beta0 = calibrate_prior(prior_equiv_tasks=0)
 
     assert isclose(alpha0, 1.0)  # 1 + prior_equiv_tasks/2 with prior_equiv_tasks=0
     assert isclose(beta0, 0.5)
@@ -414,7 +440,7 @@ def test_fit_inv_gamma_prior_for_large_prior_equiv_tasks(
 
     monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
 
-    alpha0, beta0 = fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=20)
+    alpha0, beta0 = calibrate_prior(prior_equiv_tasks=20)
 
     expected_alpha0 = 1.0 + 20 / 2.0  # 1 + n / 2
     assert isclose(alpha0, expected_alpha0)
