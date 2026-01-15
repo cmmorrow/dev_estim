@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import date
 from math import erf, exp, log, sqrt
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -43,27 +41,6 @@ def lognormal_cdf(x: float, median: float, sigma: float, bias: float = 0.0) -> f
 
 
 # -----------------------------
-# Story points -> working days
-# -----------------------------
-
-
-def _load_points_to_days() -> Dict[int, float]:
-    json_path = Path(__file__).with_name("points_to_days.json")
-    with json_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    return {int(k): float(v) for k, v in data.items()}
-
-
-POINTS_TO_DAYS: Dict[int, float] = _load_points_to_days()
-
-
-def estimate_days(points: int) -> float:
-    if points not in POINTS_TO_DAYS:
-        raise ValueError(f"Missing mapping for points={points}")
-    return float(POINTS_TO_DAYS[points])
-
-
-# -----------------------------
 # Bayesian developer model
 # -----------------------------
 
@@ -95,124 +72,132 @@ class DeveloperDurationModel:
     sum_r2: float = 0.0
     # _eps: List[float] = field(default_factory=list)
 
-    # def posterior_params(self) -> Tuple[float, float]:
-    #     return (self.alpha0 + 0.5 * self.n_completed, self.beta0 + 0.5 * self.sum_r2)
-    #
-    def posterior_params(self) -> Tuple[float, float, float, float]:
-        n = self.n_completed
-        if n == 0:
-            return (self.mu0, self.kappa0, self.alpha0, self.beta0)
-        rbar = self.sum_r / n
-        sse = self.sum_r2 - n * (rbar * rbar)
-
-        kappa = self.kappa0 + n
-        mu = (self.kappa0 * self.mu0 + n * rbar) / kappa
-        alpha = self.alpha0 + 0.5 * n
-        beta = (
-            self.beta0
-            + 0.5 * sse
-            + (self.kappa0 * n * (rbar - self.mu0) ** 2) / (2.0 * kappa)
-        )
-        return mu, kappa, alpha, beta
-
-    def add_completed(self, points: int, actual_working_days: float) -> None:
-        m = estimate_days(points)
+    def add_completed(self, m: float, actual_working_days: float) -> None:
+        """Adds a completed task to the developer model.
+        m is the estimated number of days a task should take to complete.
+        actual_working_days is the number of days it took the developer to complete the task."""
         eps = log(actual_working_days / m)
         self.n_completed += 1
         self.sum_r += eps
         self.sum_r2 += eps * eps
         # self._eps.append(eps)
 
-    def sample_bias_and_sigma(
-        self,
-        n: int = 50000,
-        rng: Optional[np.random.Generator] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Draw samples from the posterior:
-            sigma_total^2 ~ InvGamma(alpha, beta)
-            b | sigma_total^2 ~ Normal(mu, sigma_total^2/kappa)
-        """
-        rng = rng or np.random.default_rng()
-        mu, kappa, alpha, beta = self.posterior_params()
-        # If sigma^2 ~ InvGamma(alpha,beta), then precision tau=1/sigma^2 ~ Gamma(alpha, rate=beta)
-        tau = rng.gamma(shape=alpha, scale=1.0 / beta, size=n)
-        sigma2 = 1.0 / tau
-        sigma = np.sqrt(sigma2)
-        bias = rng.normal(loc=mu, scale=np.sqrt(sigma2 / kappa), size=n)
-        return bias, sigma
 
-    def p_within_multiplier(self, multiplier: float, n_samples: int = 50000) -> float:
-        """
-        Posterior-predictive P(T <= multiplier * m) for a fresh task (t=0),
-        which depends only on sigma via: Phi(ln(multiplier)/sigma).
-        """
-        _, sig = self.sample_bias_and_sigma(n_samples)
-        return float(np.mean([normal_cdf(log(multiplier) / s) for s in sig]))
+def posterior_params(
+    model: DeveloperDurationModel,
+) -> Tuple[float, float, float, float]:
+    n = model.n_completed
+    if n == 0:
+        return (model.mu0, model.kappa0, model.alpha0, model.beta0)
+    rbar = model.sum_r / n
+    sse = model.sum_r2 - n * (rbar * rbar)
 
-    def fit_inv_gamma_prior_for_multiplier(
-        self,
-        multiplier: float = 1.5,
-        target_prob: float = 0.8,
-        prior_equiv_tasks: int = 1,
-    ) -> Tuple[float, float]:
-        """
-        Returns (alpha0, beta0) such that
-        E[ Phi( ln(multiplier) / sigma ) ] ≈ target_prob
-        """
-        alpha0 = 1.0 + prior_equiv_tasks / 2.0
+    kappa = model.kappa0 + n
+    mu = (model.kappa0 * model.mu0 + n * rbar) / kappa
+    alpha = model.alpha0 + 0.5 * n
+    beta = (
+        model.beta0
+        + 0.5 * sse
+        + (model.kappa0 * n * (rbar - model.mu0) ** 2) / (2.0 * kappa)
+    )
+    return mu, kappa, alpha, beta
 
-        def objective(beta0) -> float:
-            rng = np.random.default_rng()
-            tau = rng.gamma(shape=alpha0, scale=1.0 / beta0, size=80000)
-            sigma = np.sqrt(1.0 / tau)
-            p = float(np.mean([normal_cdf(log(multiplier) / s) for s in sigma]))
-            return p - target_prob
 
-        # Reasonable search interval for beta0
-        beta0 = brent_root(objective, 0.01, 10.0)
-        self.alpha0 = alpha0
-        self.beta0 = beta0
-        return alpha0, beta0
+def sample_bias_and_sigma(
+    model: DeveloperDurationModel,
+    n: int = 50000,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Draw samples from the posterior:
+        sigma_total^2 ~ InvGamma(alpha, beta)
+        b | sigma_total^2 ~ Normal(mu, sigma_total^2/kappa)
+    """
+    rng = rng or np.random.default_rng()
+    mu, kappa, alpha, beta = posterior_params(model)
+    # If sigma^2 ~ InvGamma(alpha,beta), then precision tau=1/sigma^2 ~ Gamma(alpha, rate=beta)
+    tau = rng.gamma(shape=alpha, scale=1.0 / beta, size=n)
+    sigma2 = 1.0 / tau
+    sigma = np.sqrt(sigma2)
+    bias = rng.normal(loc=mu, scale=np.sqrt(sigma2 / kappa), size=n)
+    return bias, sigma
 
-    def realistic_estimated_days(
-        self, H: float, sigma: float, bias: float = 0.0, p: float = 0.95
-    ) -> float:
-        z = normal_quantile(p)
-        return H / exp(bias + z * sigma)
 
-    def probability_finish_by_due(
-        self,
-        start: date,
-        due: date,
-        today: date,
-        points: int,
-        n_samples: int = 50000,
-    ) -> float:
-        """
-        P(T <= D | T > t, developer data), with D and t in working days.
-        Due is exclusive because working_days_between uses [start, due).
+def p_within_multiplier(
+    model: DeveloperDurationModel, multiplier: float, n_samples: int = 50000
+) -> float:
+    """
+    Posterior-predictive P(T <= multiplier * m) for a fresh task (t=0),
+    which depends only on sigma via: Phi(ln(multiplier)/sigma).
+    """
+    _, sig = sample_bias_and_sigma(model, n_samples)
+    return float(np.mean([normal_cdf(log(multiplier) / s) for s in sig]))
 
-        T modeled as LogNormal(mu=ln(m)+b, sigma_total).
-        We sample (b, sigma_total) from posterior, then compute conditional probability.
-        """
-        if today < start:
-            raise ValueError("today must be >= start")
-        if due <= start:
-            raise ValueError("due must be > start")
 
-        m = estimate_days(points)
-        t = float(working_days_between(start, today))
-        D = float(working_days_between(start, due))
+def fit_inv_gamma_prior_for_multiplier(
+    multiplier: float = 1.5,
+    target_prob: float = 0.8,
+    prior_equiv_tasks: int = 1,
+    n_samples: int = 80000,
+) -> Tuple[float, float]:
+    """
+    Returns (alpha0, beta0) such that
+    E[ Phi( ln(multiplier) / sigma ) ] ≈ target_prob
+    """
+    alpha0 = 1.0 + prior_equiv_tasks / 2.0
 
-        if D <= t:
-            return 0.0
+    def objective(beta0) -> float:
+        rng = np.random.default_rng()
+        tau = rng.gamma(shape=alpha0, scale=1.0 / beta0, size=n_samples)
+        sigma = np.sqrt(1.0 / tau)
+        p = float(np.mean([normal_cdf(log(multiplier) / s) for s in sigma]))
+        return p - target_prob
 
-        bias, sigma = self.sample_bias_and_sigma(n_samples)
-        probs = []
-        for b, s in zip(bias, sigma):
-            Ft = lognormal_cdf(t, median=m, sigma=s, bias=b)
-            FD = lognormal_cdf(D, median=m, sigma=s, bias=b)
-            denom = 1.0 - Ft
-            probs.append(0.0 if denom <= 1e-12 else max(0.0, (FD - Ft) / denom))
-        return float(np.mean(probs))
+    # Reasonable search interval for beta0
+    beta0 = brent_root(objective, 0.01, 10.0)
+    # self.alpha0 = alpha0
+    # self.beta0 = beta0
+    return alpha0, beta0
+
+
+def probability_finish_by_due(
+    model: DeveloperDurationModel,
+    start: date,
+    due: date,
+    today: date,
+    m: float,
+    n_samples: int = 50000,
+) -> float:
+    """
+    P(T <= D | T > t, developer data), with D and t in working days.
+    Due is exclusive because working_days_between uses [start, due).
+
+    T modeled as LogNormal(mu=ln(m)+b, sigma_total).
+    We sample (b, sigma_total) from posterior, then compute conditional probability.
+    """
+    if today < start:
+        raise ValueError("today must be >= start")
+    if due <= start:
+        raise ValueError("due must be > start")
+
+    t = float(working_days_between(start, today))
+    D = float(working_days_between(start, due))
+
+    if D <= t:
+        return 0.0
+
+    bias, sigma = sample_bias_and_sigma(model, n_samples)
+    probs = []
+    for b, s in zip(bias, sigma):
+        Ft = lognormal_cdf(t, median=m, sigma=s, bias=b)
+        FD = lognormal_cdf(D, median=m, sigma=s, bias=b)
+        denom = 1.0 - Ft
+        probs.append(0.0 if denom <= 1e-12 else max(0.0, (FD - Ft) / denom))
+    return float(np.mean(probs))
+
+
+def realistic_estimated_days(
+    H: float, sigma: float, bias: float = 0.0, p: float = 0.95
+) -> float:
+    z = normal_quantile(p)
+    return H / exp(bias + z * sigma)

@@ -8,8 +8,14 @@ import pytest
 import dev_estim.task_prob as task_prob
 from dev_estim.task_prob import (
     DeveloperDurationModel,
+    fit_inv_gamma_prior_for_multiplier,
     lognormal_cdf,
     normal_cdf,
+    p_within_multiplier,
+    posterior_params,
+    probability_finish_by_due,
+    realistic_estimated_days,
+    sample_bias_and_sigma,
     working_days_between,
 )
 from dev_estim.utils import normal_quantile
@@ -42,7 +48,7 @@ def test_weekend_start_date_skips_to_next_business_day() -> None:
 def test_add_completed_updates_counts_and_residuals() -> None:
     model = DeveloperDurationModel()
 
-    model.add_completed(points=2, actual_working_days=2.0)
+    model.add_completed(m=1, actual_working_days=2.0)
 
     expected_eps = log(2.0 / 1.0)  # estimate_days(2) = 1.0
     assert model.n_completed == 1
@@ -52,7 +58,7 @@ def test_add_completed_updates_counts_and_residuals() -> None:
 
 def test_posterior_params_returns_priors_when_no_data() -> None:
     model = DeveloperDurationModel(alpha0=1.1, beta0=0.3, mu0=0.2, kappa0=5.0)
-    mu, kappa, alpha, beta = model.posterior_params()
+    mu, kappa, alpha, beta = posterior_params(model)
     assert mu == 0.2
     assert kappa == 5.0
     assert alpha == 1.1
@@ -61,10 +67,10 @@ def test_posterior_params_returns_priors_when_no_data() -> None:
 
 def test_posterior_params_accumulates_updates() -> None:
     model = DeveloperDurationModel(alpha0=2.0, beta0=0.2)
-    model.add_completed(points=3, actual_working_days=6.0)  # estimate_days(3) = 2.0
-    model.add_completed(points=1, actual_working_days=0.5)  # eps = 0
+    model.add_completed(m=2, actual_working_days=6.0)  # estimate_days(3) = 2.0
+    model.add_completed(m=0.5, actual_working_days=0.5)  # eps = 0
 
-    mu, kappa, alpha, beta = model.posterior_params()
+    mu, kappa, alpha, beta = posterior_params(model)
     eps = log(3.0)  # log(6/2)
     rbar = eps / 2
     expected_mu = (model.kappa0 * model.mu0 + 2 * rbar) / (model.kappa0 + 2)
@@ -81,23 +87,14 @@ def test_posterior_params_accumulates_updates() -> None:
     assert isclose(beta, expected_beta, rel_tol=1e-9)
 
 
-@pytest.mark.parametrize("invalid_points", [-1, 0, 4, 7])
-def test_add_completed_rejects_invalid_points(invalid_points: int) -> None:
-    model = DeveloperDurationModel()
-    with pytest.raises(ValueError):
-        model.add_completed(points=invalid_points, actual_working_days=1.0)
-
-
 def test_posterior_params_with_custom_prior_values() -> None:
     model = DeveloperDurationModel(alpha0=0.1, beta0=0.05, mu0=0.2, kappa0=2.0)
+    model.add_completed(m=1, actual_working_days=1.0)  # matches estimate -> eps = 0
     model.add_completed(
-        points=1, actual_working_days=0.5
-    )  # matches estimate -> eps = 0
-    model.add_completed(
-        points=5, actual_working_days=10.0
+        m=5, actual_working_days=10.0
     )  # estimate_days(5)=5 -> eps=ln(2)
 
-    mu, kappa, alpha, beta = model.posterior_params()
+    mu, kappa, alpha, beta = posterior_params(model)
 
     rbar = log(2.0) / 2
     sse = (log(2.0) ** 2) - 2 * (rbar * rbar)
@@ -113,26 +110,29 @@ def test_posterior_params_with_custom_prior_values() -> None:
 def test_posterior_params_matches_reference_dataset() -> None:
     model = DeveloperDurationModel(alpha0=2.0, beta0=0.2)
     records = [
-        (3, 7.0),
-        (2, 2.0),
-        (1, 0.5),
-        (5, 5.0),
-        (2, 1.0),
+        (2.0, 7.0),
+        (1.0, 2.0),
+        (0.5, 0.5),
+        (5.0, 5.0),
+        (2.0, 1.0),
     ]
 
-    for pts, actual in records:
-        model.add_completed(points=pts, actual_working_days=actual)
+    for m, actual in records:
+        model.add_completed(m=m, actual_working_days=actual)
 
-    mu, kappa, alpha, beta = model.posterior_params()
+    mu, kappa, alpha, beta = posterior_params(model)
     # expected values computed with the same formulas as posterior_params
-    eps = [log(actual / task_prob.estimate_days(pts)) for pts, actual in records]
+    eps = [log(actual / m) for m, actual in records]
     rbar = sum(eps) / len(eps)
     sse = sum(e * e for e in eps) - len(eps) * (rbar * rbar)
-    expected_mu = (model.kappa0 * model.mu0 + len(eps) * rbar) / (model.kappa0 + len(eps))
+    expected_mu = (model.kappa0 * model.mu0 + len(eps) * rbar) / (
+        model.kappa0 + len(eps)
+    )
     expected_beta = (
         model.beta0
         + 0.5 * sse
-        + (model.kappa0 * len(eps) * (rbar - model.mu0) ** 2) / (2 * (model.kappa0 + len(eps)))
+        + (model.kappa0 * len(eps) * (rbar - model.mu0) ** 2)
+        / (2 * (model.kappa0 + len(eps)))
     )
 
     assert isclose(alpha, 4.5, rel_tol=1e-12)
@@ -144,23 +144,21 @@ def test_posterior_params_matches_reference_dataset() -> None:
 def test_posterior_params_integration_with_custom_prior() -> None:
     model = DeveloperDurationModel(alpha0=1.5, beta0=0.1, mu0=0.1, kappa0=3.0)
     records = [
-        (2, 1.0),
-        (8, 15.0),  # 1.5x estimate -> small positive eps
-        (3, 1.0),  # faster than estimate -> negative eps
+        (2.0, 1.0),
+        (10.0, 15.0),  # 1.5x estimate -> small positive eps
+        (2.0, 1.0),  # faster than estimate -> negative eps
     ]
 
-    for pts, actual in records:
-        model.add_completed(points=pts, actual_working_days=actual)
+    for m, actual in records:
+        model.add_completed(m=m, actual_working_days=actual)
 
-    mu, kappa, alpha, beta = model.posterior_params()
-    eps = [log(actual / task_prob.estimate_days(pts)) for pts, actual in records]
+    mu, kappa, alpha, beta = posterior_params(model)
+    eps = [log(actual / m) for m, actual in records]
     rbar = sum(eps) / len(eps)
     sse = sum(e * e for e in eps) - len(eps) * (rbar * rbar)
     expected_mu = (3.0 * 0.1 + len(eps) * rbar) / (3.0 + len(eps))
     expected_beta = (
-        0.1
-        + 0.5 * sse
-        + (3.0 * len(eps) * (rbar - 0.1) ** 2) / (2 * (3.0 + len(eps)))
+        0.1 + 0.5 * sse + (3.0 * len(eps) * (rbar - 0.1) ** 2) / (2 * (3.0 + len(eps)))
     )
 
     assert isclose(alpha, 1.5 + len(records) / 2, rel_tol=1e-12)
@@ -172,9 +170,9 @@ def test_posterior_params_integration_with_custom_prior() -> None:
 def test_sample_bias_and_sigma_uses_given_rng_and_shapes() -> None:
     rng = np.random.default_rng(123)
     model = DeveloperDurationModel()
-    model.add_completed(points=2, actual_working_days=2.0)
+    model.add_completed(m=1, actual_working_days=2.0)
 
-    bias, sigmas = model.sample_bias_and_sigma(n=3, rng=rng)
+    bias, sigmas = sample_bias_and_sigma(model, n=3, rng=rng)
 
     assert bias.shape == (3,)
     assert sigmas.shape == (3,)
@@ -184,9 +182,9 @@ def test_sample_bias_and_sigma_uses_given_rng_and_shapes() -> None:
 def test_sample_bias_and_sigma_zero_samples() -> None:
     rng = np.random.default_rng(42)
     model = DeveloperDurationModel()
-    model.add_completed(points=2, actual_working_days=2.0)
+    model.add_completed(m=1, actual_working_days=2.0)
 
-    bias, sigmas = model.sample_bias_and_sigma(n=0, rng=rng)
+    bias, sigmas = sample_bias_and_sigma(model, n=0, rng=rng)
 
     assert bias.shape == (0,)
     assert sigmas.shape == (0,)
@@ -196,7 +194,7 @@ def test_sample_bias_and_sigma_works_with_no_completed_tasks() -> None:
     rng = np.random.default_rng(11)
     model = DeveloperDurationModel(alpha0=2.5, beta0=0.4, mu0=0.1, kappa0=3.0)
 
-    bias, sigmas = model.sample_bias_and_sigma(n=2, rng=rng)
+    bias, sigmas = sample_bias_and_sigma(model, n=2, rng=rng)
 
     assert bias.shape == (2,)
     assert sigmas.shape == (2,)
@@ -210,14 +208,16 @@ def test_sample_bias_and_sigma_works_with_no_completed_tasks() -> None:
     np.testing.assert_allclose(bias, expected_bias, rtol=1e-8)
 
 
-def test_sample_bias_and_sigma_respects_posterior_params(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sample_bias_and_sigma_respects_posterior_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     model = DeveloperDurationModel()
     rng = np.random.default_rng(7)
     expected_rng = np.random.default_rng(7)
 
-    monkeypatch.setattr(model, "posterior_params", lambda: (1.0, 2.0, 3.0, 0.4))
+    monkeypatch.setattr(task_prob, "posterior_params", lambda m: (1.0, 2.0, 3.0, 0.4))
 
-    bias, sigmas = model.sample_bias_and_sigma(n=4, rng=rng)
+    bias, sigmas = sample_bias_and_sigma(model, n=4, rng=rng)
 
     tau = expected_rng.gamma(shape=3.0, scale=1.0 / 0.4, size=4)
     sigma2 = 1.0 / tau
@@ -234,12 +234,12 @@ def test_p_within_multiplier_is_mean_of_cdf_for_fixed_sigma(
     fixed_bias = np.array([0.0, 0.0])
     fixed_sigmas = np.array([0.5, 1.0])
 
-    def _fake_sample_bias_and_sigma(n_samples: int, rng=None):  # type: ignore[override]
+    def _fake_sample_bias_and_sigma(model_arg, n_samples: int, rng=None):  # type: ignore[override]
         return fixed_bias, fixed_sigmas
 
-    monkeypatch.setattr(model, "sample_bias_and_sigma", _fake_sample_bias_and_sigma)
+    monkeypatch.setattr(task_prob, "sample_bias_and_sigma", _fake_sample_bias_and_sigma)
 
-    prob = model.p_within_multiplier(multiplier=1.0, n_samples=2)
+    prob = p_within_multiplier(model, multiplier=1.0, n_samples=2)
     assert isclose(prob, 0.5, rel_tol=1e-12)
 
 
@@ -251,10 +251,12 @@ def test_p_within_multiplier_handles_multiplier_below_one(
     fixed_sigmas = np.array([0.5])
 
     monkeypatch.setattr(
-        model, "sample_bias_and_sigma", lambda n_samples, rng=None: (fixed_bias, fixed_sigmas)
+        task_prob,
+        "sample_bias_and_sigma",
+        lambda m, n_samples, rng=None: (fixed_bias, fixed_sigmas),
     )
 
-    prob = model.p_within_multiplier(multiplier=0.5, n_samples=1)
+    prob = p_within_multiplier(model, multiplier=0.5, n_samples=1)
     expected = normal_cdf(log(0.5) / fixed_sigmas[0])
     assert isclose(prob, expected, rel_tol=1e-12)
 
@@ -264,22 +266,25 @@ def test_p_within_multiplier_raises_for_non_positive_multiplier(
 ) -> None:
     model = DeveloperDurationModel()
     monkeypatch.setattr(
-        model, "sample_bias_and_sigma", lambda n_samples, rng=None: (np.array([0.0]), np.array([1.0]))
+        task_prob,
+        "sample_bias_and_sigma",
+        lambda m, n_samples, rng=None: (np.array([0.0]), np.array([1.0])),
     )
 
     with pytest.raises(ValueError):
-        model.p_within_multiplier(multiplier=0.0, n_samples=1)
+        p_within_multiplier(model, multiplier=0.0, n_samples=1)
 
 
 def test_probability_finish_by_due_rejects_today_before_start() -> None:
     model = DeveloperDurationModel()
 
     with pytest.raises(ValueError):
-        model.probability_finish_by_due(
+        probability_finish_by_due(
+            model,
             start=date(2024, 12, 2),
             due=date(2024, 12, 5),
             today=date(2024, 12, 1),
-            points=2,
+            m=1.0,
             n_samples=10,
         )
 
@@ -288,11 +293,12 @@ def test_probability_finish_by_due_rejects_due_on_or_before_start() -> None:
     model = DeveloperDurationModel()
 
     with pytest.raises(ValueError):
-        model.probability_finish_by_due(
+        probability_finish_by_due(
+            model,
             start=date(2024, 12, 2),
             due=date(2024, 12, 2),
             today=date(2024, 12, 3),
-            points=2,
+            m=1.0,
             n_samples=10,
         )
 
@@ -303,8 +309,8 @@ def test_probability_finish_by_due_returns_zero_when_due_not_after_progress() ->
     today = date(2024, 12, 4)  # Wednesday
     due = date(2024, 12, 4)  # end exclusive -> D equals t
 
-    prob = model.probability_finish_by_due(
-        start=start, due=due, today=today, points=2, n_samples=10
+    prob = probability_finish_by_due(
+        model, start=start, due=due, today=today, m=1.0, n_samples=10
     )
 
     assert prob == 0.0
@@ -321,13 +327,13 @@ def test_probability_finish_by_due_matches_manual_calculation(
     fixed_sigmas = np.array([0.5, 1.0])
 
     monkeypatch.setattr(
-        model,
+        task_prob,
         "sample_bias_and_sigma",
-        lambda n_samples=0, rng=None: (fixed_bias, fixed_sigmas),
+        lambda m, n_samples=0, rng=None: (fixed_bias, fixed_sigmas),
     )
 
-    prob = model.probability_finish_by_due(
-        start=start, due=due, today=today, points=2, n_samples=2
+    prob = probability_finish_by_due(
+        model, start=start, due=due, today=today, m=1.0, n_samples=2
     )
 
     t = float(working_days_between(start, today))
@@ -342,11 +348,10 @@ def test_probability_finish_by_due_matches_manual_calculation(
 
 @pytest.mark.parametrize("H", [1.0, 3.5, 10.0])
 def test_realistic_estimated_days_matches_formula_with_zero_bias(H: float) -> None:
-    model = DeveloperDurationModel()
     z = normal_quantile(0.95)
     expected = H / math.exp(z * 0.5)
     assert isclose(
-        model.realistic_estimated_days(H=H, sigma=0.5, bias=0.0, p=0.95),
+        realistic_estimated_days(H=H, sigma=0.5, bias=0.0, p=0.95),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
@@ -354,11 +359,10 @@ def test_realistic_estimated_days_matches_formula_with_zero_bias(H: float) -> No
 
 
 def test_realistic_estimated_days_scales_with_positive_bias_and_sigma() -> None:
-    model = DeveloperDurationModel()
     z = normal_quantile(0.95)
     expected = 8.0 / math.exp(0.2 + z * 0.5)
     assert isclose(
-        model.realistic_estimated_days(H=8.0, sigma=0.5, bias=0.2, p=0.95),
+        realistic_estimated_days(H=8.0, sigma=0.5, bias=0.2, p=0.95),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
@@ -366,11 +370,10 @@ def test_realistic_estimated_days_scales_with_positive_bias_and_sigma() -> None:
 
 
 def test_realistic_estimated_days_scales_with_negative_bias_and_sigma() -> None:
-    model = DeveloperDurationModel()
     z = normal_quantile(0.9)
     expected = 5.0 / math.exp(-0.3 + z * 0.8)
     assert isclose(
-        model.realistic_estimated_days(H=5.0, sigma=0.8, bias=-0.3, p=0.9),
+        realistic_estimated_days(H=5.0, sigma=0.8, bias=-0.3, p=0.9),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
@@ -378,19 +381,16 @@ def test_realistic_estimated_days_scales_with_negative_bias_and_sigma() -> None:
 
 
 def test_realistic_estimated_days_uses_p_quantile() -> None:
-    model = DeveloperDurationModel()
     # p=0.5 -> z=0, so result should equal H/exp(bias)
     expected = 7.0 / math.exp(1.0)
     assert isclose(
-        model.realistic_estimated_days(H=7.0, sigma=1.2, bias=1.0, p=0.5), expected
+        realistic_estimated_days(H=7.0, sigma=1.2, bias=1.0, p=0.5), expected
     )
 
 
 def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = DeveloperDurationModel()
-
     def fake_brent_root(fn, left, right):
         assert left == 0.01 and right == 10.0
         # Call objective once to ensure it runs without error
@@ -399,27 +399,23 @@ def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(
 
     monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
 
-    alpha0, beta0 = model.fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=0)
+    alpha0, beta0 = fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=0)
 
     assert isclose(alpha0, 1.0)  # 1 + prior_equiv_tasks/2 with prior_equiv_tasks=0
     assert isclose(beta0, 0.5)
-    assert model.alpha0 == alpha0 and model.beta0 == beta0
 
 
 def test_fit_inv_gamma_prior_for_large_prior_equiv_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = DeveloperDurationModel()
-
     def fake_brent_root(fn, left, right):
         fn(2.5)
         return 2.5
 
     monkeypatch.setattr(task_prob, "brent_root", fake_brent_root)
 
-    alpha0, beta0 = model.fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=20)
+    alpha0, beta0 = fit_inv_gamma_prior_for_multiplier(prior_equiv_tasks=20)
 
     expected_alpha0 = 1.0 + 20 / 2.0  # 1 + n / 2
     assert isclose(alpha0, expected_alpha0)
     assert isclose(beta0, 2.5)
-    assert model.alpha0 == alpha0 and model.beta0 == beta0
