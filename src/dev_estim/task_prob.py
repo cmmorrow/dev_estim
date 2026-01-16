@@ -201,10 +201,54 @@ def probability_finish_by_due(
 def task_duration_estimated_days(
     model: DeveloperDurationModel,
     H: float,
-    p: float = 0.95,
+    p_complete: float = 0.95,
     n_samples: int = 50000,
+    conservative_quantile: float = 0.1
 ) -> float:
-    z = normal_quantile(p)
+    """
+    Compute a conservative "safe estimate" m (in working days) such that the task
+    completes within horizon H with probability p, while ALSO accounting
+    for uncertainty in the developer hyperparameters (bias + execution variability).
+
+    Model:
+        ln T ~ Normal(ln m + b, sigma_tot^2)
+        sigma_tot = sqrt(sigma_est^2 + sigma_exec^2)
+
+    If b and sigma_exec are uncertain (posterior), we:
+        1) draw samples (b_s, sigma_exec_s) from their posterior
+        2) compute per-draw safe estimate:
+            m_s = H / exp(b_s + z_p * sigma_tot_s)
+        3) return a conservative summary, e.g. the 10th percentile of {m_s}.
+
+    Parameters
+    ----------
+    H : float
+        Available time horizon in working days.
+    p_complete : float
+        Desired completion probability within H for a fixed set of hyperparameters.
+        Example: 0.95.
+    n_samples : int
+        Number of posterior draws to use.
+    conservative_quantile : float
+        Quantile of m_s to return. Smaller => more conservative.
+        Example: 0.10 returns the 10th percentile.
+
+    Returns
+    -------
+    float
+        Conservative safe estimate m (working days).
+
+    Notes
+    -----
+    - This provides robustness to hyperparameter uncertainty. If you set
+        conservative_quantile=0.50, you get the median m under hyperparameter uncertainty.
+    - Choose conservative_quantile based on risk tolerance (0.05–0.20 are common).
+    """
+    if H <= 0:
+        raise ValueError("H must be > 0")
+    if not (0.0 < p_complete < 1.0):
+        raise ValueError("p_complete must be in (0,1)")
+    z = normal_quantile(p_complete)
     bias, sigma = sample_bias_and_sigma(model, n=n_samples)
     estimates = H / np.exp(bias + z * sigma)
-    return float(np.percentile(estimates, 10))
+    return float(np.quantile(estimates, conservative_quantile))

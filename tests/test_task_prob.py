@@ -358,10 +358,12 @@ def test_realistic_estimated_days_percentile_with_zero_bias(
     )
 
     expected_samples = 3.0 / np.exp(bias + z * sigma)
-    expected = np.percentile(expected_samples, 10)
+    expected = np.quantile(expected_samples, 0.1)
 
     assert isclose(
-        task_duration_estimated_days(model, H=3.0, p=0.95, n_samples=5),
+        task_duration_estimated_days(
+            model, H=3.0, p_complete=0.95, n_samples=5, conservative_quantile=0.1
+        ),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
@@ -381,10 +383,12 @@ def test_realistic_estimated_days_handles_varied_bias_and_sigma(
     )
 
     samples = 5.0 / np.exp(bias + z * sigma)
-    expected = np.percentile(samples, 10)
+    expected = np.quantile(samples, 0.1)
 
     assert isclose(
-        task_duration_estimated_days(model, H=5.0, p=0.9, n_samples=4),
+        task_duration_estimated_days(
+            model, H=5.0, p_complete=0.9, n_samples=4, conservative_quantile=0.1
+        ),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
@@ -404,14 +408,40 @@ def test_realistic_estimated_days_respects_p_value(
     )
 
     samples = 7.0 / np.exp(bias)  # z=0 => multiplier uses only bias
-    expected = np.percentile(samples, 10)
+    expected = np.quantile(samples, 0.1)
 
     assert isclose(
-        task_duration_estimated_days(model, H=7.0, p=0.5, n_samples=len(bias)),
+        task_duration_estimated_days(
+            model,
+            H=7.0,
+            p_complete=0.5,
+            n_samples=len(bias),
+            conservative_quantile=0.1,
+        ),
         expected,
         rel_tol=0,
         abs_tol=1e-12,
     )
+
+
+def test_task_duration_estimated_days_rejects_non_positive_h() -> None:
+    model = DeveloperDurationModel()
+
+    with pytest.raises(ValueError):
+        task_duration_estimated_days(model, H=0.0, p_complete=0.9)
+
+    with pytest.raises(ValueError):
+        task_duration_estimated_days(model, H=-1.0, p_complete=0.9)
+
+
+def test_task_duration_estimated_days_rejects_invalid_p_complete() -> None:
+    model = DeveloperDurationModel()
+
+    with pytest.raises(ValueError):
+        task_duration_estimated_days(model, H=1.0, p_complete=0.0)
+
+    with pytest.raises(ValueError):
+        task_duration_estimated_days(model, H=1.0, p_complete=1.0)
 
 
 def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(
