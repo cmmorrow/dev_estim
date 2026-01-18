@@ -1,5 +1,5 @@
 from datetime import date
-from math import isclose, log
+from math import isclose, log, sqrt
 
 import numpy as np
 import pytest
@@ -7,6 +7,7 @@ import pytest
 import dev_estim.task_prob as task_prob
 from dev_estim.task_prob import (
     DeveloperDurationModel,
+    DeveloperEfficiencyModel,
     calibrate_prior,
     lognormal_cdf,
     normal_cdf,
@@ -53,6 +54,45 @@ def test_add_completed_updates_counts_and_residuals() -> None:
     assert model.n_completed == 1
     assert isclose(model.sum_r, expected_eps, rel_tol=1e-9)
     assert isclose(model.sum_r2, expected_eps * expected_eps, rel_tol=1e-9)
+
+
+def test_efficiency_add_completed_applies_decay() -> None:
+    model = DeveloperEfficiencyModel(tasks_half_life=1)
+
+    model.add_completed(m=2.0, actual_working_days=4.0)
+    model.add_completed(m=1.0, actual_working_days=1.0)
+
+    r1 = log(2.0)
+    expected_sum_r = 0.5 * r1
+    expected_sum_r2 = 0.5 * (r1 * r1)
+    assert model.n_completed == 2
+    assert isclose(model.sum_r, expected_sum_r, rel_tol=1e-12)
+    assert isclose(model.sum_r2, expected_sum_r2, rel_tol=1e-12)
+
+
+def test_efficiency_bias_and_sigma_are_zero_without_data() -> None:
+    model = DeveloperEfficiencyModel()
+
+    assert model.bias == 0.0
+    assert model.sigma == 0.0
+
+
+def test_efficiency_bias_and_sigma_use_decayed_sums() -> None:
+    model = DeveloperEfficiencyModel(tasks_half_life=1)
+
+    model.add_completed(m=2.0, actual_working_days=4.0)  # r=ln(2)
+    model.add_completed(m=1.0, actual_working_days=4.0)  # r=ln(4)
+
+    r1 = log(2.0)
+    r2 = log(4.0)
+    sum_r = 0.5 * r1 + r2
+    sum_r2 = 0.5 * (r1 * r1) + (r2 * r2)
+    rbar = sum_r / 2
+    rbar2 = sum_r2 / 2
+    expected_sigma = sqrt(rbar2 - rbar * rbar)
+
+    assert isclose(model.bias, rbar, rel_tol=1e-12)
+    assert isclose(model.sigma, expected_sigma, rel_tol=1e-12)
 
 
 def test_posterior_params_returns_priors_when_no_data() -> None:
@@ -343,6 +383,46 @@ def test_probability_finish_by_due_matches_manual_calculation(
         FD = lognormal_cdf(D, median=1.0, sigma=s, bias=b)
         expected.append((FD - Ft) / (1.0 - Ft))
     assert isclose(prob, sum(expected) / len(expected), rel_tol=1e-12)
+
+
+def test_probability_finish_by_due_uses_efficiency_model_bias_and_sigma() -> None:
+    model = DeveloperEfficiencyModel(tasks_half_life=1)
+    model.add_completed(m=2.0, actual_working_days=4.0)
+    model.add_completed(m=1.0, actual_working_days=3.0)
+
+    start = date(2024, 12, 2)  # Monday
+    today = date(2024, 12, 3)  # Tuesday -> t = 1
+    due = date(2024, 12, 5)  # Thursday (exclusive) -> D = 3
+    m = 1.5
+
+    prob = probability_finish_by_due(
+        model, start=start, due=due, today=today, m=m, n_samples=10
+    )
+
+    t = float(working_days_between(start, today))
+    D = float(working_days_between(start, due))
+    Ft = lognormal_cdf(t, median=m, sigma=model.sigma, bias=model.bias)
+    FD = lognormal_cdf(D, median=m, sigma=model.sigma, bias=model.bias)
+    denom = 1.0 - Ft
+    expected = 0.0 if denom <= 1e-12 else max(0.0, (FD - Ft) / denom)
+
+    assert model.sigma > 0.0
+    assert isclose(prob, expected, rel_tol=1e-12)
+
+
+def test_probability_finish_by_due_rejects_unknown_model_type() -> None:
+    class _UnknownModel:
+        pass
+
+    with pytest.raises(TypeError, match="Unsupported model type"):
+        probability_finish_by_due(
+            _UnknownModel(),
+            start=date(2024, 12, 2),
+            due=date(2024, 12, 5),
+            today=date(2024, 12, 3),
+            m=1.0,
+            n_samples=10,
+        )
 
 
 def test_realistic_estimated_days_percentile_with_zero_bias(

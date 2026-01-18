@@ -1,5 +1,6 @@
 from .task_prob import (
     DeveloperDurationModel,
+    DeveloperEfficiencyModel,
     calibrate_prior,
     p_within_multiplier,
     posterior_params,
@@ -11,6 +12,7 @@ from .task_prob import (
 
 __all__ = [
     "DeveloperDurationModel",
+    "DeveloperEfficiencyModel",
     "calibrate_prior",
     "p_within_multiplier",
     "posterior_params",

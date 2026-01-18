@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from math import erf, log, sqrt
-from typing import Optional, Tuple
+from typing import Optional, Protocol, Tuple
 
 import numpy as np
 
@@ -40,6 +40,49 @@ def lognormal_cdf(x: float, median: float, sigma: float, bias: float = 0.0) -> f
 # -----------------------------
 # Bayesian developer model
 # -----------------------------
+
+
+class EstimationModel(Protocol):
+    def add_completed(self, m: float, actual_working_days: float) -> None:
+        """Adds a completed task to the model.
+        m is the estimated number of days a task should take to complete.
+        actual_working_days is the number of days it took to complete the task."""
+        ...
+
+
+@dataclass
+class DeveloperEfficiencyModel:
+    """Tracks time-varying bias and volatility of r = ln(T/m) with exponential time dacay.
+    Half-life is specified by the number of recently completed tasks in the estimation."""
+
+    tasks_half_life: int = 15
+    n_completed: int = 0
+    sum_r: float = 0.0
+    sum_r2: float = 0.0
+
+    def add_completed(self, m: float, actual_working_days: float) -> None:
+        decay = 0.5 ** (1 / self.tasks_half_life)
+        self.n_completed += 1
+        r = log(actual_working_days / m)
+        self.sum_r = decay * self.sum_r + r
+        self.sum_r2 = decay * self.sum_r2 + r * r
+
+    @property
+    def bias(self) -> float:
+        """Returns the bias of the model."""
+        n = self.n_completed
+        rbar = self.sum_r / n if n > 0 else 0.0
+        return rbar
+
+    @property
+    def sigma(self) -> float:
+        """Returns the standard deviation of the model."""
+        n = self.n_completed
+        if n <= 0:
+            return 0.0
+        rbar = self.sum_r / n
+        rbar2 = self.sum_r2 / n
+        return sqrt(rbar2 - rbar * rbar)
 
 
 @dataclass
@@ -163,7 +206,7 @@ def calibrate_prior(
 
 
 def probability_finish_by_due(
-    model: DeveloperDurationModel,
+    model: EstimationModel,
     start: date,
     due: date,
     today: date,
@@ -188,7 +231,14 @@ def probability_finish_by_due(
     if D <= t:
         return 0.0
 
-    bias, sigma = sample_bias_and_sigma(model, n_samples)
+    if isinstance(model, DeveloperDurationModel):
+        bias, sigma = sample_bias_and_sigma(model, n_samples)
+    elif isinstance(model, DeveloperEfficiencyModel):
+        bias = np.array([model.bias])
+        sigma = np.array([model.sigma])
+    else:
+        raise TypeError(f"Unsupported model type: {type(model)}")
+
     probs = []
     for b, s in zip(bias, sigma):
         Ft = lognormal_cdf(t, median=m, sigma=s, bias=b)
@@ -203,7 +253,7 @@ def task_duration_estimated_days(
     H: float,
     p_complete: float = 0.95,
     n_samples: int = 50000,
-    conservative_quantile: float = 0.1
+    conservative_quantile: float = 0.1,
 ) -> float:
     """
     Compute a conservative "safe estimate" m (in working days) such that the task
