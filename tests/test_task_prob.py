@@ -314,6 +314,27 @@ def test_p_within_multiplier_raises_for_non_positive_multiplier(
         p_within_multiplier(model, multiplier=0.0, n_samples=1)
 
 
+def test_p_within_multiplier_uses_efficiency_model_sigma() -> None:
+    model = DeveloperEfficiencyModel()
+    sigma = 0.7
+    model.n_completed = 2
+    model.sum_r = 0.0
+    model.sum_r2 = 2.0 * sigma * sigma
+
+    prob = p_within_multiplier(model, multiplier=1.5, n_samples=1)
+
+    expected = normal_cdf(log(1.5) / sigma)
+    assert isclose(prob, expected, rel_tol=1e-12)
+
+
+def test_p_within_multiplier_rejects_unknown_model_type() -> None:
+    class _UnknownModel:
+        pass
+
+    with pytest.raises(TypeError, match="Unsupported model type"):
+        p_within_multiplier(_UnknownModel(), multiplier=1.0, n_samples=1)
+
+
 def test_probability_finish_by_due_rejects_today_before_start() -> None:
     model = DeveloperDurationModel()
 
@@ -522,6 +543,31 @@ def test_task_duration_estimated_days_rejects_invalid_p_complete() -> None:
 
     with pytest.raises(ValueError):
         task_duration_estimated_days(model, H=1.0, p_complete=1.0)
+
+
+def test_task_duration_estimated_days_uses_efficiency_model_params() -> None:
+    model = DeveloperEfficiencyModel()
+    bias = 0.2
+    sigma = 0.4
+    model.n_completed = 2
+    model.sum_r = 2.0 * bias
+    model.sum_r2 = 2.0 * (bias * bias + sigma * sigma)
+
+    result = task_duration_estimated_days(
+        model, H=12.0, p_complete=0.9, n_samples=5, conservative_quantile=0.5
+    )
+
+    z = normal_quantile(0.9)
+    expected = 12.0 / np.exp(bias + z * sigma)
+    assert isclose(result, expected, rel_tol=1e-12)
+
+
+def test_task_duration_estimated_days_rejects_unknown_model_type() -> None:
+    class _UnknownModel:
+        pass
+
+    with pytest.raises(TypeError, match="Unsupported model type"):
+        task_duration_estimated_days(_UnknownModel(), H=1.0, p_complete=0.9)
 
 
 def test_fit_inv_gamma_prior_for_small_prior_equiv_tasks(

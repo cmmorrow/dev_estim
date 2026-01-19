@@ -6,6 +6,7 @@ from math import erf, log, sqrt
 from typing import Optional, Protocol, Tuple
 
 import numpy as np
+from numpy.ma import isin
 
 from dev_estim.utils import brent_root, normal_quantile
 
@@ -171,13 +172,18 @@ def sample_bias_and_sigma(
 
 
 def p_within_multiplier(
-    model: DeveloperDurationModel, multiplier: float, n_samples: int = 50000
+    model: EstimationModel, multiplier: float, n_samples: int = 50000
 ) -> float:
     """
     Posterior-predictive P(T <= multiplier * m) for a fresh task (t=0),
     which depends only on sigma via: Phi(ln(multiplier)/sigma).
     """
-    _, sig = sample_bias_and_sigma(model, n_samples)
+    if isinstance(model, DeveloperDurationModel):
+        _, sig = sample_bias_and_sigma(model, n_samples)
+    elif isinstance(model, DeveloperEfficiencyModel):
+        sig = np.array([model.sigma])
+    else:
+        raise TypeError(f"Unsupported model type: {type(model)}")
     return float(np.mean([normal_cdf(log(multiplier) / s) for s in sig]))
 
 
@@ -249,7 +255,7 @@ def probability_finish_by_due(
 
 
 def task_duration_estimated_days(
-    model: DeveloperDurationModel,
+    model: EstimationModel,
     H: float,
     p_complete: float = 0.95,
     n_samples: int = 50000,
@@ -299,6 +305,12 @@ def task_duration_estimated_days(
     if not (0.0 < p_complete < 1.0):
         raise ValueError("p_complete must be in (0,1)")
     z = normal_quantile(p_complete)
-    bias, sigma = sample_bias_and_sigma(model, n=n_samples)
+    if isinstance(model, DeveloperDurationModel):
+        bias, sigma = sample_bias_and_sigma(model, n_samples)
+    elif isinstance(model, DeveloperEfficiencyModel):
+        bias = np.array([model.bias])
+        sigma = np.array([model.sigma])
+    else:
+        raise TypeError(f"Unsupported model type: {type(model)}")
     estimates = H / np.exp(bias + z * sigma)
     return float(np.quantile(estimates, conservative_quantile))

@@ -1,6 +1,6 @@
 [project]
 name = "dev-estim"
-version = "0.6.0"
+version = "0.7.0"
 description = "A python library for managing and measuring software engineering efficiency"
 readme = "README.md"
 authors = [
