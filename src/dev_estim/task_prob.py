@@ -6,7 +6,6 @@ from math import erf, log, sqrt
 from typing import Optional, Protocol, Tuple
 
 import numpy as np
-from numpy.ma import isin
 
 from dev_estim.utils import brent_root, normal_quantile
 
@@ -179,7 +178,7 @@ def p_within_multiplier(
     which depends only on sigma via: Phi(ln(multiplier)/sigma).
     """
     if isinstance(model, DeveloperDurationModel):
-        _, sig = sample_bias_and_sigma(model, n_samples)
+        _, sig = sample_bias_and_sigma(model, n=n_samples)
     elif isinstance(model, DeveloperEfficiencyModel):
         sig = np.array([model.sigma])
     else:
@@ -238,7 +237,7 @@ def probability_finish_by_due(
         return 0.0
 
     if isinstance(model, DeveloperDurationModel):
-        bias, sigma = sample_bias_and_sigma(model, n_samples)
+        bias, sigma = sample_bias_and_sigma(model, n=n_samples)
     elif isinstance(model, DeveloperEfficiencyModel):
         bias = np.array([model.bias])
         sigma = np.array([model.sigma])
@@ -306,7 +305,7 @@ def task_duration_estimated_days(
         raise ValueError("p_complete must be in (0,1)")
     z = normal_quantile(p_complete)
     if isinstance(model, DeveloperDurationModel):
-        bias, sigma = sample_bias_and_sigma(model, n_samples)
+        bias, sigma = sample_bias_and_sigma(model, n=n_samples)
     elif isinstance(model, DeveloperEfficiencyModel):
         bias = np.array([model.bias])
         sigma = np.array([model.sigma])

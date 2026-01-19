@@ -273,7 +273,7 @@ def test_p_within_multiplier_is_mean_of_cdf_for_fixed_sigma(
     fixed_bias = np.array([0.0, 0.0])
     fixed_sigmas = np.array([0.5, 1.0])
 
-    def _fake_sample_bias_and_sigma(model_arg, n_samples: int, rng=None):  # type: ignore[override]
+    def _fake_sample_bias_and_sigma(model_arg, n: int, rng=None):  # type: ignore[override]
         return fixed_bias, fixed_sigmas
 
     monkeypatch.setattr(task_prob, "sample_bias_and_sigma", _fake_sample_bias_and_sigma)
@@ -292,7 +292,7 @@ def test_p_within_multiplier_handles_multiplier_below_one(
     monkeypatch.setattr(
         task_prob,
         "sample_bias_and_sigma",
-        lambda m, n_samples, rng=None: (fixed_bias, fixed_sigmas),
+        lambda m, n, rng=None: (fixed_bias, fixed_sigmas),
     )
 
     prob = p_within_multiplier(model, multiplier=0.5, n_samples=1)
@@ -307,7 +307,7 @@ def test_p_within_multiplier_raises_for_non_positive_multiplier(
     monkeypatch.setattr(
         task_prob,
         "sample_bias_and_sigma",
-        lambda m, n_samples, rng=None: (np.array([0.0]), np.array([1.0])),
+        lambda m, n, rng=None: (np.array([0.0]), np.array([1.0])),
     )
 
     with pytest.raises(ValueError):
@@ -389,7 +389,7 @@ def test_probability_finish_by_due_matches_manual_calculation(
     monkeypatch.setattr(
         task_prob,
         "sample_bias_and_sigma",
-        lambda m, n_samples=0, rng=None: (fixed_bias, fixed_sigmas),
+        lambda m, n=0, rng=None: (fixed_bias, fixed_sigmas),
     )
 
     prob = probability_finish_by_due(
